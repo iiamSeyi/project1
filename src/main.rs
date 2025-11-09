@@ -194,7 +194,7 @@ enum Node {
     Newline,
     Text(String),
     Comment(String),
-    VarDef { name: String, value: String },
+    VarDef {  },
     VarUse(String),
 }
 
@@ -300,26 +300,36 @@ impl Parser {
         if let Some(x) = self.parse_variable_define() { out.push(Box::new(x)); continue; }
         if let Some(x) = self.parse_variable_use() { out.push(Box::new(x)); continue; }
 
-// Combine plain text lines into a single paragraph
-if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
-    let mut buf = String::new();
+// Accumulate inline paragraph content including bold/italic
+if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
+    let mut items = vec![];
 
-    loop {
+    while *self.cur() != Tok::EOF && !matches!(self.cur(), Tok::MAEK | Tok::KTHXBYE | Tok::OIC) {
+        if let Some(x) = self.parse_bold() {
+            items.push(Box::new(x));
+            continue;
+        }
+        if let Some(x) = self.parse_italics() {
+            items.push(Box::new(x));
+            continue;
+        }
         match self.cur().clone() {
             Tok::TEXT(s) | Tok::VARDEF(s) => {
-                if !buf.is_empty() { buf.push(' '); }
-                buf.push_str(&s);
+                items.push(Box::new(Node::Text(s)));
                 self.bump();
             }
             _ => break,
         }
     }
 
-    out.push(Box::new(Node::Paragraph(vec![Box::new(Node::Text(buf.trim().to_string()))])));
+    if !items.is_empty() {
+        out.push(Box::new(Node::Paragraph(items)));
+    }
     continue;
 } else {
     self.bump();
 }
+
     }
 
     if *self.cur() == Tok::KTHXBYE {
@@ -337,49 +347,109 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
 
 
     fn parse_paragraph(&mut self) -> Option<Node> {
-        if !(*self.cur() == Tok::MAEK && *self.next() == Tok::PARAGRAF) { return None; }
-        self.bump(); self.bump();
-        let mut items = vec![];
-        if let Some(vd) = self.parse_variable_define() { items.push(Box::new(vd)); }
-        while *self.cur() != Tok::OIC && *self.cur() != Tok::EOF {
-            if let Some(x) = self.parse_variable_use() { items.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_bold() { items.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_italics() { items.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_list() { items.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_audio() { items.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_video() { items.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_newline() { items.push(Box::new(x)); continue; }
-            match self.cur().clone() {
-    Tok::TEXT(s) | Tok::VARDEF(s) => { items.push(Box::new(Node::Text(s))); self.bump(); }
-    _ => break,
+    if !(*self.cur() == Tok::MAEK && *self.next() == Tok::PARAGRAF) { return None; }
+    self.bump(); // MAEK
+    self.bump(); // PARAGRAF
+
+    let mut items: Vec<Box<Node>> = vec![];
+
+    // Optional leading variable define
+    if let Some(vd) = self.parse_variable_define() {
+        items.push(Box::new(vd));
+    }
+
+    while *self.cur() != Tok::OIC && *self.cur() != Tok::EOF {
+        // Stray #MKAY is illegal in a paragraph
+        if *self.cur() == Tok::MKAY {
+            panic!("Syntax error: #MKAY outside of a #GIMMEH block inside PARAGRAF");
+        }
+
+        if let Some(x) = self.parse_variable_use()   { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_bold()           { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_italics()        { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_list()           { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_audio()          { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_video()          { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_newline()        { items.push(Box::new(x)); continue; }
+
+        // Coalesce consecutive TEXT / VARDEF tokens into one text node with spaces
+        match self.cur().clone() {
+            Tok::TEXT(first) | Tok::VARDEF(first) => {
+                let mut buf = first;
+                self.bump();
+                while matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
+                    match self.cur().clone() {
+                        Tok::TEXT(next) | Tok::VARDEF(next) => {
+                            if !buf.is_empty() { buf.push(' '); }
+                            buf.push_str(&next);
+                        }
+                        _ => {}
+                    }
+                    self.bump();
+                }
+                items.push(Box::new(Node::Text(buf)));
+            }
+            // Anything else is an unexpected token in a paragraph
+            unexpected => {
+                panic!("Syntax error: unexpected token inside PARAGRAF: {:?}", unexpected);
+            }
+        }
+    }
+
+    if *self.cur() == Tok::OIC { self.bump(); } else {
+        panic!("Syntax error: expected #OIC to close PARAGRAF");
+    }
+
+    Some(Node::Paragraph(items))
 }
 
-        }
-        if *self.cur() == Tok::OIC { self.bump(); }
-        Some(Node::Paragraph(items))
-    }
 
     fn parse_bold(&mut self) -> Option<Node> {
-        if !(*self.cur() == Tok::GIMMEH && *self.next() == Tok::BOLD) { return None; }
-        self.bump(); self.bump();
-        let text = match self.cur().clone() {
-            Tok::TEXT(t) => { self.bump(); t }
-            _ => panic!("Expected TEXT after BOLD"),
-        };
-        if *self.cur() == Tok::MKAY { self.bump(); }
-        Some(Node::Bold(text))
+    if !(*self.cur() == Tok::GIMMEH && *self.next() == Tok::BOLD) { return None; }
+    self.bump(); // GIMMEH
+    self.bump(); // BOLD
+
+    let mut buf = String::new();
+    while !matches!(self.cur(), Tok::MKAY | Tok::EOF) {
+        match self.cur().clone() {
+            Tok::TEXT(s) | Tok::VARDEF(s) => {
+                if !buf.is_empty() { buf.push(' '); }
+                buf.push_str(&s);
+                self.bump();
+            }
+            _ => break,
+        }
     }
 
-    fn parse_italics(&mut self) -> Option<Node> {
-        if !(*self.cur() == Tok::GIMMEH && *self.next() == Tok::ITALICS) { return None; }
-        self.bump(); self.bump();
-        let text = match self.cur().clone() {
-            Tok::TEXT(t) => { self.bump(); t }
-            _ => panic!("Expected TEXT after ITALICS"),
-        };
-        if *self.cur() == Tok::MKAY { self.bump(); }
-        Some(Node::Italic(text))
+    if *self.cur() == Tok::MKAY { self.bump(); } else {
+        panic!("Syntax error: missing #MKAY after BOLD block");
     }
+    Some(Node::Bold(buf.trim().to_string()))
+}
+
+
+    fn parse_italics(&mut self) -> Option<Node> {
+    if !(*self.cur() == Tok::GIMMEH && *self.next() == Tok::ITALICS) { return None; }
+    self.bump(); // GIMMEH
+    self.bump(); // ITALICS
+
+    let mut buf = String::new();
+    while !matches!(self.cur(), Tok::MKAY | Tok::EOF) {
+        match self.cur().clone() {
+            Tok::TEXT(s) | Tok::VARDEF(s) => {
+                if !buf.is_empty() { buf.push(' '); }
+                buf.push_str(&s);
+                self.bump();
+            }
+            _ => break, // do not swallow non text tokens here
+        }
+    }
+
+    if *self.cur() == Tok::MKAY { self.bump(); } else {
+        panic!("Syntax error: missing #MKAY after ITALICS block");
+    }
+    Some(Node::Italic(buf.trim().to_string()))
+}
 
     fn parse_list(&mut self) -> Option<Node> {
         if !(*self.cur() == Tok::MAEK && *self.next() == Tok::LIST) { return None; }
@@ -444,7 +514,7 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
         };
         if *self.cur() == Tok::MKAY { self.bump(); }
         self.vars.insert(name.clone(), value.clone());
-        Some(Node::VarDef { name, value })
+        Some(Node::VarDef {})
     }
 
     fn parse_variable_use(&mut self) -> Option<Node> {
@@ -472,7 +542,15 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
                 let t = title.clone().unwrap_or_default();
                 format!("<head><title>{}</title></head>", html_escape(&t))
             }
-            Node::Paragraph(items) => format!("<p>{}</p>", items.iter().map(|x| self.to_html(x)).collect::<String>()),
+            Node::Paragraph(items) => {
+    let parts = items
+        .iter()
+        .map(|x| self.to_html(x))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    format!("<p>{}</p>", parts.join(" ").trim())
+},
+
             Node::Bold(s) => format!("<strong>{}</strong>", html_escape(s)),
             Node::Italic(s) => format!("<em>{}</em>", html_escape(s)),
             Node::List(items) => format!("<ul>{}</ul>", items.iter().map(|x| self.to_html(x)).collect::<String>()),
@@ -482,7 +560,7 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
             Node::Newline => "<br/>".to_string(),
             Node::Text(s) => html_escape(s),
             Node::Comment(c) => format!("<!-- {} -->", c),
-            Node::VarDef { name, value } => format!("<span data-var=\"{}\">{}</span>", html_attr(name), html_escape(value)),
+            Node::VarDef { .. } =>String::new(), // variable definitions do not produce output
             Node::VarUse(name) => {
                 if let Some(v) = self.vars.get(name) { html_escape(v) }
                 else { format!("{{{{{}}}}}", html_escape(name)) }
