@@ -102,7 +102,11 @@ impl Lexer {
     fn read_plain_text(&mut self) -> String {
         let mut s = String::new();
         while let Some(c) = self.peek() {
-            if is_allowed_text_char(c) { s.push(c); self.bump(); } else { break; }
+            if c == '#'  { 
+                break; 
+            }
+            s.push(c); 
+            self.bump();
         }
         s.trim().to_string()
     }
@@ -242,57 +246,95 @@ impl Parser {
     }
 
     fn parse_head(&mut self) -> Option<Box<Node>> {
-        if !(*self.cur() == Tok::MAEK && *self.next() == Tok::HEAD) { return None; }
-        self.bump(); self.bump();
-        let mut title = None;
-        if *self.cur() == Tok::GIMMEH && *self.next() == Tok::TITLE {
-            self.bump(); self.bump();
-            if let Tok::TEXT(mut t) = self.cur().clone() { 
-                self.bump(); 
-                // Keep reading all consecutive TEXT tokens to capture full title
-                while let Tok::TEXT(next) = self.cur().clone() {
-                    t.push(' ');
-                    t.push_str(&next);
+    if !(*self.cur() == Tok::MAEK && *self.next() == Tok::HEAD) {
+        return None;
+    }
+
+    self.bump(); // MAEK
+    self.bump(); // HEAD
+
+    let mut title: Option<String> = None;
+
+    if *self.cur() == Tok::GIMMEH && *self.next() == Tok::TITLE {
+        self.bump(); // GIMMEH
+        self.bump(); // TITLE
+
+        // Accumulate title from TEXT or VARDEF until #MKAY
+        let mut acc = String::new();
+        loop {
+            match self.cur().clone() {
+                Tok::TEXT(s) | Tok::VARDEF(s) => {
+                    if !acc.is_empty() { acc.push(' '); }
+                    acc.push_str(&s);
                     self.bump();
                 }
-                title = Some(t);  
+                _ => break,
             }
-            if *self.cur() == Tok::MKAY { self.bump(); }
         }
-        while *self.cur() != Tok::OIC && *self.cur() != Tok::EOF { self.bump(); }
-        if *self.cur() == Tok::OIC { self.bump(); }
-        Some(Box::new(Node::Head { title }))
+        if !acc.trim().is_empty() {
+            title = Some(acc.trim().to_string());
+        }
+
+        if *self.cur() == Tok::MKAY { self.bump(); }
     }
 
-    fn parse_body(&mut self) -> Vec<Box<Node>> {
-        let mut out = vec![];
-        while *self.cur() != Tok::KTHXBYE && *self.cur() != Tok::EOF {
-            if let Some(x) = self.parse_comment() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_paragraph() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_bold() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_italics() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_list() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_audio() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_video() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_newline() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_variable_define() { out.push(Box::new(x)); continue; }
-            if let Some(x) = self.parse_variable_use() { out.push(Box::new(x)); continue; }
-            if let Tok::TEXT(first) = self.cur().clone() {
-    let mut buf = first.clone();
-    self.bump();
-    // Capture all consecutive text pieces
-    while let Tok::TEXT(next) = self.cur().clone() {
-        buf.push(' ');
-        buf.push_str(&next);
-        self.bump();
-    }
-    out.push(Box::new(Node::Paragraph(vec![Box::new(Node::Text(buf))])));
+    // Consume until OIC
+    while *self.cur() != Tok::OIC && *self.cur() != Tok::EOF { self.bump(); }
+    if *self.cur() == Tok::OIC { self.bump(); }
+
+    Some(Box::new(Node::Head { title }))
 }
 
-            else { self.bump(); }
+    fn parse_body(&mut self) -> Vec<Box<Node>> {
+    let mut out = vec![];
+
+    while *self.cur() != Tok::KTHXBYE && *self.cur() != Tok::EOF {
+        if let Some(x) = self.parse_comment() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_paragraph() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_bold() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_italics() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_list() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_audio() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_video() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_newline() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_variable_define() { out.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_variable_use() { out.push(Box::new(x)); continue; }
+
+// Combine plain text lines into a single paragraph
+if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
+    let mut buf = String::new();
+
+    loop {
+        match self.cur().clone() {
+            Tok::TEXT(s) | Tok::VARDEF(s) => {
+                if !buf.is_empty() { buf.push(' '); }
+                buf.push_str(&s);
+                self.bump();
+            }
+            _ => break,
         }
-        out
     }
+
+    out.push(Box::new(Node::Paragraph(vec![Box::new(Node::Text(buf.trim().to_string()))])));
+    continue;
+} else {
+    self.bump();
+}
+    }
+
+    if *self.cur() == Tok::KTHXBYE {
+        while let Tok::TEXT(t) = self.cur().clone() {
+    if t.trim().is_empty() {
+        self.bump();
+    } else {
+        break;
+    }
+}
+    }
+
+    out
+}
+
 
     fn parse_paragraph(&mut self) -> Option<Node> {
         if !(*self.cur() == Tok::MAEK && *self.next() == Tok::PARAGRAF) { return None; }
@@ -307,8 +349,11 @@ impl Parser {
             if let Some(x) = self.parse_audio() { items.push(Box::new(x)); continue; }
             if let Some(x) = self.parse_video() { items.push(Box::new(x)); continue; }
             if let Some(x) = self.parse_newline() { items.push(Box::new(x)); continue; }
-            if let Tok::TEXT(s) = self.cur().clone() { items.push(Box::new(Node::Text(s))); self.bump(); }
-            else { break; }
+            match self.cur().clone() {
+    Tok::TEXT(s) | Tok::VARDEF(s) => { items.push(Box::new(Node::Text(s))); self.bump(); }
+    _ => break,
+}
+
         }
         if *self.cur() == Tok::OIC { self.bump(); }
         Some(Node::Paragraph(items))
@@ -347,6 +392,8 @@ impl Parser {
             else if let Some(x) = self.parse_bold() { inner.push(Box::new(x)); }
             else if let Some(x) = self.parse_italics() { inner.push(Box::new(x)); }
             else if let Tok::TEXT(t) = self.cur().clone() { inner.push(Box::new(Node::Text(t))); self.bump(); }
+            else if let Tok::VARDEF(t) = self.cur().clone() { inner.push(Box::new(Node::Text(t))); self.bump(); }
+
             if *self.cur() == Tok::MKAY { self.bump(); }
             items.push(Box::new(Node::ListItem(inner)));
         }
