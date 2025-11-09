@@ -36,6 +36,22 @@ enum Tok {
 //
 // ========== HELPERS ==========
 //
+fn fix_spacing(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == ' ' {
+            if let Some(&next) = it.peek() {
+                if matches!(next, '.' | ',' | '!' | '?' | ':' | ';') {
+                    continue; // drop space before punctuation
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn upper(s: &str) -> String { s.chars().flat_map(|c| c.to_uppercase()).collect() }
 fn is_letter(c: char) -> bool { c.is_ascii_alphabetic() }
 fn is_allowed_text_char(c: char) -> bool {
@@ -195,19 +211,41 @@ enum Node {
     Text(String),
     Comment(String),
     VarDef {  },
-    VarUse(String),
+    
 }
 
 struct Parser {
     tokens: Vec<Tok>,
     i: usize,
-    vars: HashMap<String, String>,
+    scopes: Vec<HashMap<String, String>>,
 }
 
 impl Parser {
     fn new(tokens: Vec<Tok>) -> Self {
-        Self { tokens, i: 0, vars: HashMap::new() }
+        Self { tokens, i: 0, scopes: vec![HashMap::new()] }
     }
+    fn push_scope(&mut self) {
+    self.scopes.push(HashMap::new());
+}
+
+fn pop_scope(&mut self) {
+    self.scopes.pop();
+}
+
+fn define_var(&mut self, name: &str, value: &str) {
+    if let Some(scope) = self.scopes.last_mut() {
+        scope.insert(name.to_string(), value.to_string());
+    }
+}
+
+fn lookup_var(&self, name: &str) -> Option<String> {
+    for scope in self.scopes.iter().rev() {
+        if let Some(v) = scope.get(name) {
+            return Some(v.clone());
+        }
+    }
+    None
+}
 
     fn cur(&self) -> &Tok { self.tokens.get(self.i).unwrap_or(&Tok::EOF) }
     fn next(&self) -> &Tok { self.tokens.get(self.i + 1).unwrap_or(&Tok::EOF) }
@@ -347,23 +385,24 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
 
 
     fn parse_paragraph(&mut self) -> Option<Node> {
-    if !(*self.cur() == Tok::MAEK && *self.next() == Tok::PARAGRAF) { return None; }
+    if !(*self.cur() == Tok::MAEK && *self.next() == Tok::PARAGRAF) {
+        return None;
+    }
     self.bump(); // MAEK
     self.bump(); // PARAGRAF
 
+    // --- Create a local scope for this paragraph ---
+    self.push_scope();
+
     let mut items: Vec<Box<Node>> = vec![];
 
-    // Optional leading variable define
-    if let Some(vd) = self.parse_variable_define() {
-        items.push(Box::new(vd));
-    }
-
+    // Parse everything inside the paragraph
     while *self.cur() != Tok::OIC && *self.cur() != Tok::EOF {
-        // Stray #MKAY is illegal in a paragraph
         if *self.cur() == Tok::MKAY {
             panic!("Syntax error: #MKAY outside of a #GIMMEH block inside PARAGRAF");
         }
 
+        if let Some(x) = self.parse_variable_define() { items.push(Box::new(x)); continue; }
         if let Some(x) = self.parse_variable_use()   { items.push(Box::new(x)); continue; }
         if let Some(x) = self.parse_bold()           { items.push(Box::new(x)); continue; }
         if let Some(x) = self.parse_italics()        { items.push(Box::new(x)); continue; }
@@ -372,7 +411,7 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
         if let Some(x) = self.parse_video()          { items.push(Box::new(x)); continue; }
         if let Some(x) = self.parse_newline()        { items.push(Box::new(x)); continue; }
 
-        // Coalesce consecutive TEXT / VARDEF tokens into one text node with spaces
+        // Combine consecutive TEXT / VARDEF tokens into one text node
         match self.cur().clone() {
             Tok::TEXT(first) | Tok::VARDEF(first) => {
                 let mut buf = first;
@@ -387,22 +426,29 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
                     }
                     self.bump();
                 }
-                items.push(Box::new(Node::Text(buf)));
+                items.push(Box::new(Node::Text(buf.trim().to_string())));
             }
-            // Anything else is an unexpected token in a paragraph
             unexpected => {
-                panic!("Syntax error: unexpected token inside PARAGRAF: {:?}", unexpected);
+                panic!(
+                    "Syntax error: unexpected token {:?} inside PARAGRAF at index {}",
+                    unexpected, self.i
+                );
             }
         }
     }
 
-    if *self.cur() == Tok::OIC { self.bump(); } else {
+    // Close the paragraph properly
+    if *self.cur() == Tok::OIC {
+        self.bump();
+    } else {
         panic!("Syntax error: expected #OIC to close PARAGRAF");
     }
 
+    // --- End local scope ---
+    self.pop_scope();
+
     Some(Node::Paragraph(items))
 }
-
 
     fn parse_bold(&mut self) -> Option<Node> {
     if !(*self.cur() == Tok::GIMMEH && *self.next() == Tok::BOLD) { return None; }
@@ -509,24 +555,35 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
         if *self.cur() != Tok::ITIZ { panic!("Expected #IT IZ"); }
         self.bump();
         let value = match self.cur().clone() {
-            Tok::TEXT(v) => { self.bump(); v }
-            _ => panic!("Expected TEXT value"),
-        };
+    Tok::TEXT(v) | Tok::VARDEF(v) => { self.bump(); v }
+    _ => panic!("Expected TEXT or VARDEF as value after #IT IZ"),
+};
+
         if *self.cur() == Tok::MKAY { self.bump(); }
-        self.vars.insert(name.clone(), value.clone());
+        self.define_var(&name, &value);
         Some(Node::VarDef {})
     }
 
     fn parse_variable_use(&mut self) -> Option<Node> {
-        if *self.cur() != Tok::LEMMESEE { return None; }
-        self.bump();
-        let name = match self.cur().clone() {
-            Tok::VARDEF(n) => { self.bump(); n }
-            _ => panic!("Expected variable name after #LEMME SEE"),
-        };
-        if *self.cur() == Tok::MKAY { self.bump(); }
-        Some(Node::VarUse(name))
+    if *self.cur() != Tok::LEMMESEE { return None; }
+    self.bump(); // LEMME SEE
+
+    let name = match self.cur().clone() {
+        Tok::VARDEF(n) => { self.bump(); n }
+        _ => panic!("Expected variable name after #LEMME SEE"),
+    };
+
+    if *self.cur() == Tok::MKAY { self.bump(); }
+
+    // Resolve using the CURRENT scope stack (local shadows global)
+    if let Some(v) = self.lookup_var(&name) {
+        // Emit the resolved value as plain text so it survives scope pop
+        Some(Node::Text(v))
+    } else {
+        eprintln!("Semantic Error: Undefined variable '{}'", name);
+        std::process::exit(1);
     }
+}
 
     pub fn to_html(&self, n: &Node) -> String {
         match n {
@@ -548,7 +605,8 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
         .map(|x| self.to_html(x))
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
-    format!("<p>{}</p>", parts.join(" ").trim())
+    let joined = parts.join(" ").trim().to_string();
+    format!("<p>{}</p>", fix_spacing(&joined))
 },
 
             Node::Bold(s) => format!("<strong>{}</strong>", html_escape(s)),
@@ -561,10 +619,7 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
             Node::Text(s) => html_escape(s),
             Node::Comment(c) => format!("<!-- {} -->", c),
             Node::VarDef { .. } =>String::new(), // variable definitions do not produce output
-            Node::VarUse(name) => {
-                if let Some(v) = self.vars.get(name) { html_escape(v) }
-                else { format!("{{{{{}}}}}", html_escape(name)) }
-            }
+            
         }
     }
 }
