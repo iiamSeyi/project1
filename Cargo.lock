@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "project1"
+name = "lolcompiler"
 version = "0.1.0"

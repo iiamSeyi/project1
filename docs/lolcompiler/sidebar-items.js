@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Node","Tok"],"fn":["fix_spacing","html_attr","html_escape","is_address_char","is_letter","main","open_in_browser","read_entire_file","upper"],"struct":["Lexer","Parser"],"trait":["Compiler","LexicalAnalyzer"]};
