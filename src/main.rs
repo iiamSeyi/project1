@@ -54,9 +54,7 @@ fn fix_spacing(s: &str) -> String {
 
 fn upper(s: &str) -> String { s.chars().flat_map(|c| c.to_uppercase()).collect() }
 fn is_letter(c: char) -> bool { c.is_ascii_alphabetic() }
-fn is_allowed_text_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, ' ' | ',' | '.' | '"' | '?' | '_' | ':' | '/')
-}
+
 fn is_address_char(c: char) -> bool { c != ' ' && c != '\n' && c != '\r' && c != '\t' }
 
 //
@@ -68,11 +66,12 @@ struct Lexer {
     line: usize,
     col: usize,
     lookahead: VecDeque<Tok>,
+    expect_keyword: bool,
 }
 
 impl Lexer {
     fn new(input: &str) -> Self {
-        Self { src: input.to_string(), pos: 0, line: 1, col: 1, lookahead: VecDeque::new() }
+        Self { src: input.to_string(), pos: 0, line: 1, col: 1, lookahead: VecDeque::new(), expect_keyword: false }
     }
 
     fn peek(&self) -> Option<char> { self.src[self.pos..].chars().next() }
@@ -150,9 +149,9 @@ impl Lexer {
                 Tok::OBTW
             }
             "TLDR" => Tok::TLDR,
-            "MAEK" => Tok::MAEK,
+            "MAEK" => {self.expect_keyword = true; Tok::MAEK},
             "OIC" => Tok::OIC,
-            "GIMMEH" => Tok::GIMMEH,
+            "GIMMEH" => {self.expect_keyword = true; Tok::GIMMEH},
             "MKAY" => Tok::MKAY,
             "I" => { self.skip_ws(); let w2 = self.read_word(); if upper(&w2) == "HAZ" { Tok::IHAZ } else { self.error("Expected HAZ after #I"); } }
             "IT" => { self.skip_ws(); let w2 = self.read_word(); if upper(&w2) == "IZ" { Tok::ITIZ } else { self.error("Expected IZ after #IT"); } }
@@ -162,35 +161,48 @@ impl Lexer {
     }
 
     fn next_token_internal(&mut self) -> Tok {
-        if let Some(tok) = self.lookahead.pop_front() { return tok; }
-        self.skip_ws();
-        let Some(c) = self.peek() else { return Tok::EOF; };
-        if c == '#' { self.bump(); return self.read_hash_directive(); }
+    if let Some(tok) = self.lookahead.pop_front() { return tok; }
+    self.skip_ws();
+
+    if self.peek() == Some('#') { self.bump(); return self.read_hash_directive(); }
+
+    // URLs still become ADDRESS
+    let rest = &self.src[self.pos..];
+    if rest.starts_with("http://") || rest.starts_with("https://") {
+        let s = self.read_address();
+        return Tok::ADDRESS(s);
+    }
+
+    if let Some(c) = self.peek() {
         if is_letter(c) {
             let w = self.read_word();
-            match upper(&w).as_str() {
-                "HEAD" => Tok::HEAD,
-                "TITLE" => Tok::TITLE,
-                "PARAGRAF" => Tok::PARAGRAF,
-                "BOLD" => Tok::BOLD,
-                "ITALICS" => Tok::ITALICS,
-                "LIST" => Tok::LIST,
-                "ITEM" => Tok::ITEM,
-                "NEWLINE" => Tok::NEWLINE,
-                "SOUNDZ" => Tok::SOUNDZ,
-                "VIDZ" => Tok::VIDZ,
-                _ => Tok::VARDEF(w),
+            if self.expect_keyword {
+                self.expect_keyword = false; // consume the “keyword slot”
+                return match upper(&w).as_str() {
+                    "HEAD"     => Tok::HEAD,
+                    "TITLE"    => Tok::TITLE,
+                    "PARAGRAF" => Tok::PARAGRAF,
+                    "BOLD"     => Tok::BOLD,
+                    "ITALICS"  => Tok::ITALICS,
+                    "LIST"     => Tok::LIST,
+                    "ITEM"     => Tok::ITEM,
+                    "NEWLINE"  => Tok::NEWLINE,
+                    "SOUNDZ"   => Tok::SOUNDZ,
+                    "VIDZ"     => Tok::VIDZ,
+                    _ => Tok::VARDEF(w),
+                };
+            } else {
+                // In normal prose (not right after MAEK/GIMMEH), treat words as identifiers/text
+                return Tok::VARDEF(w);
             }
-        } else if is_address_char(c) {
-            let s = self.read_address();
-            if s.contains('/') || s.contains(':') { Tok::ADDRESS(s) } else { Tok::TEXT(s) }
-        } else if is_allowed_text_char(c) {
-            let s = self.read_plain_text();
-            Tok::TEXT(s)
-        } else {
-            self.error(&format!("Illegal character '{}'", c));
         }
     }
+
+    // Everything else becomes TEXT until the next '#'
+    let s = self.read_plain_text();
+    if s.is_empty() { Tok::EOF } else { Tok::TEXT(s) }
+}
+
 }
 
 //
@@ -201,8 +213,8 @@ enum Node {
     Program { head: Option<Box<Node>>, body: Vec<Box<Node>>, comments: Vec<Box<Node>> },
     Head { title: Option<String> },
     Paragraph(Vec<Box<Node>>),
-    Bold(String),
-    Italic(String),
+    Bold(Vec<Box<Node>>),
+    Italic(Vec<Box<Node>>),
     List(Vec<Box<Node>>),
     ListItem(Vec<Box<Node>>),
     Audio(String),
@@ -413,28 +425,26 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
 
         // Combine consecutive TEXT / VARDEF tokens into one text node
         match self.cur().clone() {
-            Tok::TEXT(first) | Tok::VARDEF(first) => {
-                let mut buf = first;
-                self.bump();
-                while matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_)) {
-                    match self.cur().clone() {
-                        Tok::TEXT(next) | Tok::VARDEF(next) => {
-                            if !buf.is_empty() { buf.push(' '); }
-                            buf.push_str(&next);
-                        }
-                        _ => {}
-                    }
-                    self.bump();
+    Tok::TEXT(first) | Tok::VARDEF(first) | Tok::ADDRESS(first) => {
+        let mut buf = first;
+        self.bump();
+        while matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::ADDRESS(_)) {
+            match self.cur().clone() {
+                Tok::TEXT(next) | Tok::VARDEF(next) | Tok::ADDRESS(next) => {
+                    if !buf.is_empty() { buf.push(' '); }
+                    buf.push_str(&next);
                 }
-                items.push(Box::new(Node::Text(buf.trim().to_string())));
+                _ => {}
             }
-            unexpected => {
-                panic!(
-                    "Syntax error: unexpected token {:?} inside PARAGRAF at index {}",
-                    unexpected, self.i
-                );
-            }
+            self.bump();
         }
+        items.push(Box::new(Node::Text(buf)));
+    }
+    unexpected => {
+        panic!("Syntax error: unexpected token {:?} inside PARAGRAF at index {}", unexpected, self.i);
+    }
+}
+
     }
 
     // Close the paragraph properly
@@ -455,12 +465,18 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
     self.bump(); // GIMMEH
     self.bump(); // BOLD
 
-    let mut buf = String::new();
+    let mut items: Vec<Box<Node>> = vec![];
+
     while !matches!(self.cur(), Tok::MKAY | Tok::EOF) {
+        // Allow nested constructs
+        if let Some(x) = self.parse_italics()        { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_variable_use()   { items.push(Box::new(x)); continue; }
+        if let Some(x) = self.parse_newline()        { items.push(Box::new(x)); continue; }
+
+        // Coalesce inline text-y tokens
         match self.cur().clone() {
-            Tok::TEXT(s) | Tok::VARDEF(s) => {
-                if !buf.is_empty() { buf.push(' '); }
-                buf.push_str(&s);
+            Tok::TEXT(s) | Tok::VARDEF(s) | Tok::ADDRESS(s) => {
+                items.push(Box::new(Node::Text(s)));
                 self.bump();
             }
             _ => break,
@@ -470,31 +486,42 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
     if *self.cur() == Tok::MKAY { self.bump(); } else {
         panic!("Syntax error: missing #MKAY after BOLD block");
     }
-    Some(Node::Bold(buf.trim().to_string()))
+    Some(Node::Bold(items))
 }
-
 
     fn parse_italics(&mut self) -> Option<Node> {
     if !(*self.cur() == Tok::GIMMEH && *self.next() == Tok::ITALICS) { return None; }
     self.bump(); // GIMMEH
     self.bump(); // ITALICS
 
-    let mut buf = String::new();
-    while !matches!(self.cur(), Tok::MKAY | Tok::EOF) {
+    let mut items: Vec<Box<Node>> = vec![];
+
+    loop {
         match self.cur().clone() {
-            Tok::TEXT(s) | Tok::VARDEF(s) => {
-                if !buf.is_empty() { buf.push(' '); }
-                buf.push_str(&s);
+            Tok::MKAY => {
+                self.bump(); // close italics
+                break;
+            }
+            // Keep italics simple (no nested bold here). Allow variable uses and texty pieces.
+            _ if self.parse_variable_use().is_some() => {
+                // parse_variable_use already returns a Node::Text with the resolved value
+                if let Some(x) = self.parse_variable_use() { items.push(Box::new(x)); }
+            }
+            Tok::TEXT(s) | Tok::VARDEF(s) | Tok::ADDRESS(s) => {
+                items.push(Box::new(Node::Text(s)));
                 self.bump();
             }
-            _ => break, // do not swallow non text tokens here
+            Tok::EOF => {
+                panic!("Syntax error: unterminated ITALICS block (expected #MKAY before EOF)");
+            }
+            other => {
+                // Stay strict: no nesting inside italics
+                panic!("Syntax error: expected text inside ITALICS until #MKAY, found {:?}", other);
+            }
         }
     }
 
-    if *self.cur() == Tok::MKAY { self.bump(); } else {
-        panic!("Syntax error: missing #MKAY after ITALICS block");
-    }
-    Some(Node::Italic(buf.trim().to_string()))
+    Some(Node::Italic(items))
 }
 
     fn parse_list(&mut self) -> Option<Node> {
@@ -609,8 +636,17 @@ if matches!(self.cur(), Tok::TEXT(_) | Tok::VARDEF(_) | Tok::GIMMEH) {
     format!("<p>{}</p>", fix_spacing(&joined))
 },
 
-            Node::Bold(s) => format!("<strong>{}</strong>", html_escape(s)),
-            Node::Italic(s) => format!("<em>{}</em>", html_escape(s)),
+Node::Bold(items) => {
+    let parts = items.iter().map(|x| self.to_html(x)).filter(|s| !s.is_empty()).collect::<Vec<_>>();
+    let joined = parts.join(" ").trim().to_string();
+    format!("<strong>{}</strong>", fix_spacing(&joined))
+},
+Node::Italic(items) => {
+    let parts = items.iter().map(|x| self.to_html(x)).filter(|s| !s.is_empty()).collect::<Vec<_>>();
+    let joined = parts.join(" ").trim().to_string();
+    format!("<em>{}</em>", fix_spacing(&joined))
+},
+
             Node::List(items) => format!("<ul>{}</ul>", items.iter().map(|x| self.to_html(x)).collect::<String>()),
             Node::ListItem(inner) => format!("<li>{}</li>", inner.iter().map(|x| self.to_html(x)).collect::<String>()),
             Node::Audio(a) => format!("<audio controls src=\"{}\"></audio>", html_attr(a)),
