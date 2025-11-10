@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 
+
+
 //
 // ========== TRAITS ==========
 //
@@ -36,6 +38,74 @@ enum Tok {
 //
 // ========== HELPERS ==========
 //
+
+fn open_in_browser(p: &Path) -> io::Result<()> {
+    use std::process::Command;
+    use std::fs;
+
+    // Ensure file exists
+    if !p.exists() {
+        eprintln!("⚠️ Output file not found: {}", p.display());
+        return Ok(());
+    }
+
+    // Canonical path, then clean up weird Windows prefix (\\?\)
+    let abs = fs::canonicalize(p)?;
+    let mut path_str = abs.display().to_string();
+    if path_str.starts_with(r"\\?\") {
+        path_str = path_str.trim_start_matches(r"\\?\").to_string();
+    }
+
+    // Build proper file URL
+    let url = if cfg!(windows) {
+        format!("file:///{}", path_str.replace('\\', "/"))
+    } else {
+        format!("file://{}", path_str)
+    };
+
+    println!("🌐 Opening in Chrome: {}", url);
+
+    #[cfg(target_os = "windows")]
+    {
+        // Try Chrome directly
+        let chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ];
+        let mut opened = false;
+        for chrome in &chrome_paths {
+            if Path::new(chrome).exists() {
+                Command::new(chrome)
+                    .args(["--new-window", &url])
+                    .spawn()?;
+                opened = true;
+                break;
+            }
+        }
+        if !opened {
+            Command::new("cmd").args(["/C", "start", "", &url]).spawn()?;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open")
+            .args(["-a", "Google Chrome", &url])
+            .status();
+
+        if !status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            Command::new("open").arg(&url).status()?;
+        }
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(&url).spawn();
+    }
+
+    Ok(())
+}
+
 fn fix_spacing(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -715,4 +785,10 @@ fn main() {
     let out = path.with_extension("html");
     fs::write(&out, html).unwrap();
     println!("✅ Compiled to {}", out.display());
+
+    if let Err(e) = open_in_browser(&out) {
+    eprintln!("Note: could not open browser automatically: {}", e);
+}
+
+
 }
